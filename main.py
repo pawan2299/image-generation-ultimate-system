@@ -95,13 +95,30 @@ async def post_init(application: Application):
 def main():
     # Initialize Database Pool
     import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    asyncio.run(db.init_db())
+
+    app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     
-    loop.run_until_complete(db.init_db())
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
+    # [R&D CONTEXT]: Webhook configuration with explicit port binding for Render
+    # Render injects PORT environment variable, we use it or default to 8000
+    port = Config.PORT
+    webhook_url = f"{Config.WEBHOOK_URL}/{Config.TELEGRAM_BOT_TOKEN}"
+    
+    logger.info(f"🚀 Starting webhook on port {port}")
+    logger.info(f"🌐 Webhook URL: {webhook_url}")
+    
+    # [R&D CONTEXT]: Explicitly bind to 0.0.0.0 so Render can detect the port
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=Config.TELEGRAM_BOT_TOKEN,
+        webhook_url=webhook_url,
+        allowed_updates=Update.ALL_TYPES  # Accept all update types
+    )
 
     app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     
