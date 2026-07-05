@@ -1,4 +1,6 @@
 -- [R&D CONTEXT]: Relational schema optimized for Supabase/Neon Postgres.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE user_profiles (
     user_id BIGINT PRIMARY KEY,
     style_profile TEXT DEFAULT '',
