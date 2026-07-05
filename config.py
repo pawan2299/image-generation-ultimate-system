@@ -1,22 +1,22 @@
 import os
 from dotenv import load_dotenv
 
-# [R&D CONTEXT]: Load environment variables from .env file for local testing.
-# In production (Koyeb/Render), these are injected directly by the hosting platform.
+# [R&D CONTEXT]: Load .env file for local testing. 
+# On Render, it will automatically read from the dashboard's Environment Variables.
 load_dotenv()
 
 class Config:
-    # Telegram Configuration
+    # Telegram
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "") # e.g., https://your-app.koyeb.app
     
-    # AI Engines (The God-Tier Stack)
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "") # For Vision Director & Fallback
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")     # For Lightning-fast Whisper & Prompt Injection
+    # AI Engines
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     
-    # Database (Neon.tech Serverless Postgres)
-    # Format: postgresql://user:password@host/dbname?sslmode=require
+    # Database (Neon.tech)
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     
-    # System Configurations
+    # Server / Render Config
     PORT: int = int(os.getenv("PORT", 8000))
+    WEBHOOK_URL: str = os.getenv("RENDER_EXTERNAL_URL", "") 
+    # Note: Render automatically injects RENDER_EXTERNAL_URL, we just read it here.
