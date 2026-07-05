@@ -16,7 +16,7 @@ def _get_client() -> httpx.AsyncClient:
     global _CLIENT
     if _CLIENT is None:
         _CLIENT = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(60.0, connect=15.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
     return _CLIENT
@@ -39,11 +39,60 @@ async def _post_json(url: str, *, headers: dict[str, str] | None = None, json_pa
             last_error = exc
             logger.exception("HTTP request failed on attempt %s/%s: %s", attempt + 1, retries + 1, exc)
             if attempt < retries:
-                await asyncio.sleep(1.5 * (attempt + 1))
+                await asyncio.sleep(2.0 * (attempt + 1))
                 continue
             raise RuntimeError(f"Request failed after {retries + 1} attempts") from last_error
 
-async def enhance_prompt_cinematic(user_prompt: str) -> str:
+# ==========================================
+# LAYER 1: CINEMATIC PROMPT ENHANCEMENT
+# ==========================================
+async def enhance_prompt_gemini(user_prompt: str) -> str:
+    """Primary: Uses Gemini for prompt enhancement (most reliable)"""
+    system_prompt = (
+        "You are a Hollywood Cinematographer and Master AI Artist. "
+        "Convert the user's basic idea into a highly detailed, ultra-realistic cinematic prompt. "
+        "Add camera gear (ARRI Alexa 65, 85mm lens), lighting (Volumetric God-rays, Golden Hour), "
+        "and render details (Unreal Engine 5, 8k, hyper-detailed skin texture). "
+        "Output ONLY the final prompt. No explanations."
+    )
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": f"{system_prompt}\n\nUser idea: {user_prompt}"}]
+        }],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 500}
+    }
+    
+    # Try all Gemini models with multi-key fallback
+    for model in Config.GEMINI_MODELS:
+        for api_key in Config.GEMINI_API_KEYS:
+            try:
+                logger.info(f"Trying Gemini Prompt Enhancement: {model}")
+                client = _get_client()
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                resp = await client.post(url, json=payload)
+                
+                if resp.status_code == 429:
+                    continue  # Rate limit, try next
+                
+                resp.raise_for_status()
+                data = resp.json()
+                text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                logger.info(f"✅ Gemini prompt enhancement successful with {model}")
+                return text
+                
+            except Exception as exc:
+                logger.warning(f"Gemini {model} prompt enhancement failed: {exc}")
+                continue
+    
+    logger.error("All Gemini prompt enhancement attempts failed")
+    return user_prompt.strip()
+
+async def enhance_prompt_groq(user_prompt: str) -> str:
+    """Fallback: Uses Groq for prompt enhancement (optional)"""
+    if not Config.GROQ_API_KEY:
+        return user_prompt.strip()
+    
     system_prompt = (
         "You are a Hollywood Cinematographer and Master AI Artist. "
         "Convert the user's basic idea into a highly detailed, ultra-realistic cinematic prompt. "
@@ -58,6 +107,7 @@ async def enhance_prompt_cinematic(user_prompt: str) -> str:
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.7,
+        "max_tokens": 500,
     }
     try:
         data = await _post_json(
@@ -67,24 +117,52 @@ async def enhance_prompt_cinematic(user_prompt: str) -> str:
                 "Content-Type": "application/json",
             },
             json_payload=payload,
+            retries=1,  # Only 1 retry for Groq
         )
         return data["choices"][0]["message"]["content"].strip()
     except Exception as exc:
         logger.error("Groq prompt enhancement failed: %s", exc)
         return user_prompt.strip()
 
+async def enhance_prompt_cinematic(user_prompt: str) -> str:
+    """Hybrid: Gemini primary, Groq fallback"""
+    # Try Gemini first (most reliable)
+    result = await enhance_prompt_gemini(user_prompt)
+    if result and result != user_prompt.strip():
+        return result
+    
+    # Fallback to Groq if Gemini fails
+    logger.info("Gemini prompt enhancement failed, trying Groq fallback...")
+    result = await enhance_prompt_groq(user_prompt)
+    return result
+
+# ==========================================
+# LAYER 2: IMAGE GENERATION
+# ==========================================
 async def generate_image(final_prompt: str, aspect_ratio: str = "16:9") -> tuple[None, str | None, str]:
+    """Generates high-quality images with quality boosters"""
     dims = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (1024, 1024)}
     w, h = dims.get(aspect_ratio, (1024, 1024))
-    encoded_prompt = urllib.parse.quote(final_prompt)
+    
+    # Add quality boosters
+    quality_boosters = ", masterpiece, best quality, ultra-detailed, 8k, photorealistic, cinematic lighting"
+    enhanced_prompt = f"{final_prompt}{quality_boosters}"
+    encoded_prompt = urllib.parse.quote(enhanced_prompt)
     seed = int(time.time())
+    
     url = (
         f"https://image.pollinations.ai/prompt/{encoded_prompt}"
         f"?model=flux-realism&width={w}&height={h}&nologo=true&seed={seed}"
     )
+    
+    logger.info(f"Generating image with Flux-Realism")
     return None, url, "Flux-Realism"
 
-async def vision_director_groq(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
+# ==========================================
+# LAYER 3: VISION DIRECTOR
+# ==========================================
+async def vision_director_gemini(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
+    """Primary: Gemini Vision with multi-model + multi-key fallback"""
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     system_prompt = (
         "You are an Autonomous Art Director. Analyze the provided image. "
@@ -92,25 +170,73 @@ async def vision_director_groq(image_bytes: bytes, current_context: str) -> dict
         "If it is a masterpiece, think of ONE subtle cinematic upgrade to evolve it for the next iteration. "
         'Output STRICT JSON: {"thought": "...", "next_prompt": "...", "caption": "...", "is_perfect": boolean}'
     )
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": f"{system_prompt}\nCurrent Context: {current_context}"},
+                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+            ]
+        }],
+        "generationConfig": {"response_mime_type": "application/json"}
+    }
+
+    # Try all Gemini models with multi-key fallback
+    for model in Config.GEMINI_MODELS:
+        for api_key in Config.GEMINI_API_KEYS:
+            try:
+                logger.info(f"Trying Gemini Vision: {model}")
+                client = _get_client()
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                resp = await client.post(url, json=payload)
+                
+                if resp.status_code == 429:
+                    continue  # Rate limit, try next
+                
+                resp.raise_for_status()
+                data = resp.json()
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                parsed = json.loads(text)
+                
+                if isinstance(parsed, dict) and "next_prompt" in parsed:
+                    logger.info(f"✅ Gemini Vision successful with {model}")
+                    return parsed
+                    
+            except Exception as exc:
+                logger.warning(f"Gemini Vision {model} failed: {exc}")
+                continue
+    
+    logger.error("All Gemini Vision attempts failed")
+    return None
+
+async def vision_director_groq(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
+    """Fallback: Groq Vision (optional)"""
+    if not Config.GROQ_API_KEY:
+        return None
+    
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    system_prompt = (
+        "You are an Autonomous Art Director. Analyze the provided image. "
+        "If it has bad anatomy, plastic skin, or AI artifacts, output a FIXED PROMPT. "
+        "If it is a masterpiece, think of ONE subtle cinematic upgrade to evolve it for the next iteration. "
+        'Output STRICT JSON: {"thought": "...", "next_prompt": "...", "caption": "...", "is_perfect": boolean}'
+    )
+    
     payload = {
         "model": "llama-3.2-90b-vision-preview",
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"{system_prompt}\nCurrent Context: {current_context}"},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{img_b64}"
-                        }
-                    }
+                    {"type": "text", "text": f"{system_prompt}\nContext: {current_context}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
                 ]
             }
         ],
-        "temperature": 0.7,
+        "temperature": 0.6,
         "max_tokens": 1024,
     }
+    
     try:
         data = await _post_json(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -119,93 +245,30 @@ async def vision_director_groq(image_bytes: bytes, current_context: str) -> dict
                 "Content-Type": "application/json",
             },
             json_payload=payload,
-            retries=2,
+            retries=1,
         )
         text = data["choices"][0]["message"]["content"].strip()
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
         elif "```" in text:
             text = text.split("```")[1].split("```")[0].strip()
+        
         parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            logger.info("Groq Vision analysis successful")
+        if isinstance(parsed, dict) and "next_prompt" in parsed:
+            logger.info("✅ Groq Vision successful")
             return parsed
     except Exception as exc:
         logger.error("Groq vision failed: %s", exc)
         return None
 
-async def vision_director_gemini(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
-    """
-    Multi-Key + Multi-Model Fallback for Gemini Vision API.
-    Iterates through all available models and API keys to bypass rate limits (429).
-    """
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    system_prompt = (
-        "You are an Autonomous Art Director. Analyze the provided image. "
-        "If it has bad anatomy, plastic skin, or AI artifacts, output a FIXED PROMPT. "
-        "If it is a masterpiece, think of ONE subtle cinematic upgrade to evolve it for the next iteration. "
-        'Output STRICT JSON: {"thought": "...", "next_prompt": "...", "caption": "...", "is_perfect": boolean}'
-    )
-    
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": f"{system_prompt}\nCurrent Context: {current_context}"},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
-                ]
-            }
-        ],
-        "generationConfig": {"response_mime_type": "application/json"},
-    }
-
-    # Nested loop: Try every model with every API key
-    for model in Config.GEMINI_MODELS:
-        for api_key in Config.GEMINI_API_KEYS:
-            try:
-                logger.info(f"🔄 Trying Gemini Vision: Model [{model}] | Key ending in [...{api_key[-4:]}]")
-                
-                # Direct httpx call to handle fallback gracefully without long retries
-                client = _get_client()
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-                resp = await client.post(url, json=payload)
-                
-                # If Rate Limit (429) is hit, immediately jump to the next key/model
-                if resp.status_code == 429:
-                    logger.warning(f"⚠️ Rate limit hit for {model}. Switching to next key/model...")
-                    continue  
-                
-                resp.raise_for_status()
-                data = resp.json()
-                
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                parsed = json.loads(text)
-                if isinstance(parsed, dict):
-                    logger.info(f"✅ Gemini Vision successful with Model [{model}]")
-                    return parsed
-                    
-            except Exception as exc:
-                logger.warning(f"❌ Failed: Model [{model}] | Key ending in [...{api_key[-4:]}] - Reason: {exc}")
-                continue  # Try next key/model
-                
-    logger.error("🚨 All Gemini models and keys exhausted or failed.")
-    return None
-
 async def vision_director(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
-    """
-    Hybrid vision director: Try Groq first (fast), then Gemini Multi-Key Fallback.
-    """
-    # Try Groq Vision first (primary - fast and reliable)
-    result = await vision_director_groq(image_bytes, current_context)
-    if result:
-        return result
-    
-    # If Groq fails, try Gemini Multi-Key Fallback
-    logger.info("Groq failed, trying Gemini Multi-Key Fallback...")
+    """Hybrid: Gemini primary, Groq fallback"""
+    # Try Gemini first (most reliable with multi-key fallback)
     result = await vision_director_gemini(image_bytes, current_context)
     if result:
         return result
     
-    # Both failed
-    logger.error("Both Groq and Gemini vision failed completely.")
-    return None
+    # Fallback to Groq if Gemini fails
+    logger.info("Gemini Vision failed, trying Groq fallback...")
+    result = await vision_director_groq(image_bytes, current_context)
+    return result
