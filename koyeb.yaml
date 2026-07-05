@@ -1,0 +1,11 @@
+name: image-generation-ultimate-system
+services:
+- name: main
+  type: worker
+  build:
+    dockerfile: Dockerfile
+  run:
+    command: python main.py
+  env:
+  - key: PORT
+    value: "8000"
