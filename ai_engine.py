@@ -84,7 +84,7 @@ async def generate_image(final_prompt: str, aspect_ratio: str = "16:9") -> tuple
     )
     return None, url, "Flux-Realism"
 
-async def vision_director(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
+async def vision_director_groq(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     system_prompt = (
         "You are an Autonomous Art Director. Analyze the provided image. "
@@ -93,10 +93,64 @@ async def vision_director(image_bytes: bytes, current_context: str) -> dict[str,
         'Output STRICT JSON: {"thought": "...", "next_prompt": "...", "caption": "...", "is_perfect": boolean}'
     )
     payload = {
+        "model": "llama-3.2-90b-vision-preview",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"{system_prompt}\nCurrent Context: {current_context}"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_b64}"
+                        }
+                    }
+                ]
+            }
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1024,
+    }
+    try:
+        data = await _post_json(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {Config.GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json_payload=payload,
+            retries=2,
+        )
+        text = data["choices"][0]["message"]["content"].strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            logger.info("Groq Vision analysis successful")
+            return parsed
+    except Exception as exc:
+        logger.error("Groq vision failed: %s", exc)
+        return None
+
+async def vision_director_gemini(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
+    """
+    Multi-Key + Multi-Model Fallback for Gemini Vision API.
+    Iterates through all available models and API keys to bypass rate limits (429).
+    """
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    system_prompt = (
+        "You are an Autonomous Art Director. Analyze the provided image. "
+        "If it has bad anatomy, plastic skin, or AI artifacts, output a FIXED PROMPT. "
+        "If it is a masterpiece, think of ONE subtle cinematic upgrade to evolve it for the next iteration. "
+        'Output STRICT JSON: {"thought": "...", "next_prompt": "...", "caption": "...", "is_perfect": boolean}'
+    )
+    
+    payload = {
         "contents": [
             {
                 "parts": [
-                    # [FIX]: Corrected the newline formatting here
                     {"text": f"{system_prompt}\nCurrent Context: {current_context}"},
                     {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
                 ]
@@ -104,16 +158,54 @@ async def vision_director(image_bytes: bytes, current_context: str) -> dict[str,
         ],
         "generationConfig": {"response_mime_type": "application/json"},
     }
-    try:
-        # [FIX]: Updated from deprecated 'gemini-1.5-flash' to latest 'gemini-2.0-flash'
-        data = await _post_json(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={Config.GEMINI_API_KEY}",
-            json_payload=payload,
-        )
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception as exc:
-        logger.error("Gemini vision failed: %s", exc)
-        return None
+
+    # Nested loop: Try every model with every API key
+    for model in Config.GEMINI_MODELS:
+        for api_key in Config.GEMINI_API_KEYS:
+            try:
+                logger.info(f"🔄 Trying Gemini Vision: Model [{model}] | Key ending in [...{api_key[-4:]}]")
+                
+                # Direct httpx call to handle fallback gracefully without long retries
+                client = _get_client()
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                resp = await client.post(url, json=payload)
+                
+                # If Rate Limit (429) is hit, immediately jump to the next key/model
+                if resp.status_code == 429:
+                    logger.warning(f"⚠️ Rate limit hit for {model}. Switching to next key/model...")
+                    continue  
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    logger.info(f"✅ Gemini Vision successful with Model [{model}]")
+                    return parsed
+                    
+            except Exception as exc:
+                logger.warning(f"❌ Failed: Model [{model}] | Key ending in [...{api_key[-4:]}] - Reason: {exc}")
+                continue  # Try next key/model
+                
+    logger.error("🚨 All Gemini models and keys exhausted or failed.")
+    return None
+
+async def vision_director(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
+    """
+    Hybrid vision director: Try Groq first (fast), then Gemini Multi-Key Fallback.
+    """
+    # Try Groq Vision first (primary - fast and reliable)
+    result = await vision_director_groq(image_bytes, current_context)
+    if result:
+        return result
+    
+    # If Groq fails, try Gemini Multi-Key Fallback
+    logger.info("Groq failed, trying Gemini Multi-Key Fallback...")
+    result = await vision_director_gemini(image_bytes, current_context)
+    if result:
+        return result
+    
+    # Both failed
+    logger.error("Both Groq and Gemini vision failed completely.")
+    return None
