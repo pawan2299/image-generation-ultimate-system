@@ -5,15 +5,12 @@ import logging
 import time
 import urllib.parse
 from typing import Any
-
 import httpx
-
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 _CLIENT: httpx.AsyncClient | None = None
-
 
 def _get_client() -> httpx.AsyncClient:
     global _CLIENT
@@ -24,13 +21,11 @@ def _get_client() -> httpx.AsyncClient:
         )
     return _CLIENT
 
-
 async def close_http_client() -> None:
     global _CLIENT
     if _CLIENT is not None:
         await _CLIENT.aclose()
         _CLIENT = None
-
 
 async def _post_json(url: str, *, headers: dict[str, str] | None = None, json_payload: dict[str, Any] | None = None, retries: int = 2) -> dict[str, Any]:
     last_error: Exception | None = None
@@ -46,8 +41,7 @@ async def _post_json(url: str, *, headers: dict[str, str] | None = None, json_pa
             if attempt < retries:
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue
-    raise RuntimeError(f"Request failed after {retries + 1} attempts") from last_error
-
+            raise RuntimeError(f"Request failed after {retries + 1} attempts") from last_error
 
 async def enhance_prompt_cinematic(user_prompt: str) -> str:
     system_prompt = (
@@ -65,7 +59,6 @@ async def enhance_prompt_cinematic(user_prompt: str) -> str:
         ],
         "temperature": 0.7,
     }
-
     try:
         data = await _post_json(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -80,7 +73,6 @@ async def enhance_prompt_cinematic(user_prompt: str) -> str:
         logger.error("Groq prompt enhancement failed: %s", exc)
         return user_prompt.strip()
 
-
 async def generate_image(final_prompt: str, aspect_ratio: str = "16:9") -> tuple[None, str | None, str]:
     dims = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (1024, 1024)}
     w, h = dims.get(aspect_ratio, (1024, 1024))
@@ -91,7 +83,6 @@ async def generate_image(final_prompt: str, aspect_ratio: str = "16:9") -> tuple
         f"?model=flux-realism&width={w}&height={h}&nologo=true&seed={seed}"
     )
     return None, url, "Flux-Realism"
-
 
 async def vision_director(image_bytes: bytes, current_context: str) -> dict[str, Any] | None:
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -105,17 +96,18 @@ async def vision_director(image_bytes: bytes, current_context: str) -> dict[str,
         "contents": [
             {
                 "parts": [
-                    {"text": f"{system_prompt}\n\nCurrent Context: {current_context}"},
+                    # [FIX]: Corrected the newline formatting here
+                    {"text": f"{system_prompt}\nCurrent Context: {current_context}"},
                     {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
                 ]
             }
         ],
         "generationConfig": {"response_mime_type": "application/json"},
     }
-
     try:
+        # [FIX]: Updated from deprecated 'gemini-1.5-flash' to latest 'gemini-2.0-flash'
         data = await _post_json(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={Config.GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={Config.GEMINI_API_KEY}",
             json_payload=payload,
         )
         text = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -124,4 +116,4 @@ async def vision_director(image_bytes: bytes, current_context: str) -> dict[str,
             return parsed
     except Exception as exc:
         logger.error("Gemini vision failed: %s", exc)
-    return None
+        return None
