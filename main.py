@@ -1,138 +1,162 @@
 import asyncio
 import logging
-import io
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.error import RetryAfter
-from config import Config
-import database as db
-import ai_engine as ai
 
-# [R&D CONTEXT]: Standard Python logging configured for production monitoring.
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+import ai_engine as ai
+import database as db
+from config import Config
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+CAPTION_LIMIT = 900
+MESSAGE_LIMIT = 3500
+
+
+def _truncate(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     await update.message.reply_text(
-        "🤖 *Autonomous Vision Engine (God-Tier Edition) Online*\n\n"
-        "• Send a *Text Prompt* for Cinematic Generation.\n"
-        "• Send an *Image* to start the Autonomous Evolution Loop.\n"
-        "• Send a *Voice Note* for lazy generation.", parse_mode="Markdown"
+        "Autonomous Vision Engine online.\n\n"
+        "• Send a text prompt for cinematic generation.\n"
+        "• Send an image to start the evolution loop."
     )
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    raw_prompt = update.message.text
-    
-    msg = await update.message.reply_text("🧠 *Layer 1:* Injecting Cinematic Syntax via Groq...", parse_mode="Markdown")
-    
-    # Layer 1: Enhance Prompt
-    final_prompt = await ai.enhance_prompt_cinematic(raw_prompt)
-    await msg.edit_text(f"🎨 *Layer 2:* Rendering via Flux-Realism...\n`{final_prompt}`", parse_mode="Markdown")
-    
-    # Layer 2: Generate Image
-    img_bytes, url, source = await ai.generate_image(final_prompt, "16:9")
-    
-    if img_bytes:
-        await msg.delete()
-        # Layer 4 (Implicit): Telegram handles the delivery.
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id, 
-            photo=url, # Sending URL directly saves RAM (Ghost Pipeline)
-            caption=f"🎬 *Masterpiece Rendered*\n📝 *Cinematic Prompt:* {final_prompt}",
-            parse_mode="Markdown"
-        )
-        # Save to Insta Queue
-        await db.save_asset(user_id, url, final_prompt, "Cinematic AI Art #AI #Render")
-    else:
-        await msg.edit_text("❌ Render Engines failed to respond.")
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """The Autonomous Visual Evolution Loop (Krishna Flow)"""
-    await update.message.reply_text("👁️ *Vision Director* is analyzing your image... Starting Evolution Loop.", parse_mode="Markdown")
-    
-    photo_file = await update.message.photo[-1].get_file()
-    img_bytes = await photo_file.download_as_bytearray()
-    context_text = "Initial user provided reference image."
-    
-    # Loop 3 times for demonstration of the Evolution Engine
-    for i in range(1, 4): 
-        # Layer 3: Vision Director Analysis
-        analysis = await ai.vision_director(bytes(img_bytes), context_text)
-        if not analysis: break
-        
-        thought = analysis.get("thought", "Processing visual data...")
-        next_prompt = analysis.get("next_prompt", context_text)
-        caption = analysis.get("caption", "AI Evolution")
-        
-        await context.bot.send_message(
-            update.effective_chat.id, 
-            f"🧠 *Iteration {i} Thought:* {thought}\n🎨 *Generating Upgrade...*", 
-            parse_mode="Markdown"
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user or not update.effective_chat:
+        return
+
+    user_id = update.effective_user.id
+    raw_prompt = update.message.text or ""
+
+    status = await update.message.reply_text("Processing prompt...")
+
+    try:
+        final_prompt = await ai.enhance_prompt_cinematic(raw_prompt)
+        _, url, _ = await ai.generate_image(final_prompt, "16:9")
+
+        if not url:
+            await status.edit_text("Render engines failed to return an image URL.")
+            return
+
+        await status.delete()
+        caption = _truncate(
+            f"Masterpiece rendered.\nPrompt: {final_prompt}",
+            CAPTION_LIMIT,
         )
-        
-        img_bytes, url, source = await ai.generate_image(next_prompt, "9:16")
-        if img_bytes:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=url,
+            caption=caption,
+        )
+        await db.save_asset(user_id, url, final_prompt, "Cinematic AI Art")
+    except Exception:
+        logger.exception("Text handler failed")
+        await status.edit_text("Request failed.")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user or not update.effective_chat:
+        return
+
+    try:
+        await update.message.reply_text("Analyzing image and starting evolution loop...")
+        photo = update.message.photo
+        if not photo:
+            await update.message.reply_text("No photo found in message.")
+            return
+
+        photo_file = await photo[-1].get_file()
+        img_bytes = await photo_file.download_as_bytearray()
+        context_text = "Initial user provided reference image."
+
+        for i in range(1, 4):
+            analysis = await ai.vision_director(bytes(img_bytes), context_text)
+            if not analysis:
+                break
+
+            thought = _truncate(str(analysis.get("thought", "Processing visual data...")), 300)
+            next_prompt = str(analysis.get("next_prompt", context_text)).strip() or context_text
+            caption = _truncate(str(analysis.get("caption", "AI Evolution")), CAPTION_LIMIT)
+
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"Iteration {i}: {thought}",
+            )
+
+            _, url, _ = await ai.generate_image(next_prompt, "9:16")
+            if not url:
+                break
+
             await context.bot.send_photo(
-                update.effective_chat.id,
+                chat_id=update.effective_chat.id,
                 photo=url,
-                caption=f"🔄 *Evolution {i}*\n{caption}"
+                caption=caption,
             )
             await db.save_asset(update.effective_user.id, url, next_prompt, caption)
             context_text = next_prompt
-            await asyncio.sleep(3) # Telegram Anti-Spam protection
-        else:
-            break
-            
-    await update.message.reply_text("✅ *Evolution Cycle Complete.* Top assets queued for Instagram Pipeline.", parse_mode="Markdown")
+            await asyncio.sleep(3)
 
-async def post_init(application: Application):
-    """[R&D CONTEXT]: Registers the Webhook on Koyeb/Render startup."""
-    webhook_url = f"{Config.WEBHOOK_URL}/{Config.TELEGRAM_BOT_TOKEN}"
+        await update.message.reply_text("Evolution cycle finished.")
+    except Exception:
+        logger.exception("Photo handler failed")
+        await update.message.reply_text("Image processing failed.")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled exception: %s", context.error)
+
+
+async def post_init(application: Application) -> None:
+    await db.init_db()
+    webhook_url = f"{Config.WEBHOOK_URL.rstrip('/')}/{Config.WEBHOOK_PATH}"
     await application.bot.set_webhook(url=webhook_url)
-    logger.info(f"✅ Webhook successfully set to {webhook_url}")
+    logger.info("Webhook configured successfully.")
 
-def main():
-    # Initialize Database Pool
-    import asyncio
-    asyncio.run(db.init_db())
 
-    app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
-    # [R&D CONTEXT]: Webhook configuration with explicit port binding for Render
-    # Render injects PORT environment variable, we use it or default to 8000
-    port = Config.PORT
-    webhook_url = f"{Config.WEBHOOK_URL}/{Config.TELEGRAM_BOT_TOKEN}"
-    
-    logger.info(f"🚀 Starting webhook on port {port}")
-    logger.info(f"🌐 Webhook URL: {webhook_url}")
-    
-    # [R&D CONTEXT]: Explicitly bind to 0.0.0.0 so Render can detect the port
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=Config.TELEGRAM_BOT_TOKEN,
-        webhook_url=webhook_url,
-        allowed_updates=Update.ALL_TYPES  # Accept all update types
+async def post_shutdown(application: Application) -> None:
+    await db.close_db()
+    await ai.close_http_client()
+    logger.info("Application shutdown complete.")
+
+
+def main() -> None:
+    app = (
+        Application.builder()
+        .token(Config.TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
     )
 
-    app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
-    # [R&D CONTEXT]: Run webhook to keep server alive and listen to Telegram pushes.
+    app.add_error_handler(error_handler)
+
+    webhook_url = f"{Config.WEBHOOK_URL.rstrip('/')}/{Config.WEBHOOK_PATH}"
+    logger.info("Starting webhook server on port %s", Config.PORT)
+    logger.info("Webhook configured.")
+
     app.run_webhook(
         listen="0.0.0.0",
         port=Config.PORT,
-        url_path=Config.TELEGRAM_BOT_TOKEN,
-        webhook_url=f"{Config.WEBHOOK_URL}/{Config.TELEGRAM_BOT_TOKEN}"
+        url_path=Config.WEBHOOK_PATH,
+        webhook_url=webhook_url,
+        allowed_updates=Update.ALL_TYPES,
     )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
