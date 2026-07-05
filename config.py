@@ -21,7 +21,7 @@ class Config:
     _gemini_keys_str = os.getenv("GEMINI_API_KEYS", "")
     GEMINI_API_KEYS: list[str] = [k.strip() for k in _gemini_keys_str.split(",") if k.strip()]
     
-    # Fallback to single GEMINI_API_KEY if multi-key is not provided (for backward compatibility)
+    # Fallback to single GEMINI_API_KEY if multi-key is not provided
     if not GEMINI_API_KEYS:
         single_key = os.getenv("GEMINI_API_KEY", "").strip()
         if single_key:
@@ -29,13 +29,13 @@ class Config:
         else:
             raise RuntimeError("Missing required environment variable: GEMINI_API_KEYS (comma-separated) or GEMINI_API_KEY")
             
-    # Priority list of models for fallback (User's researched list + 2.0-flash for high TPM vision)
+    # Priority list of models for fallback (Latest & Smartest First, High TPM Fallback Last)
     GEMINI_MODELS: list[str] = [
-        "gemini-2.0-flash",       # 15 RPM, 1M TPM (Best for Vision)
-        "gemini-3.5-flash",       # 10 RPM, 250k TPM
-        "gemini-2.5-flash",       # 10 RPM, 250k TPM
-        "gemini-3.1-flash-lite",  # 15 RPM, 250k TPM
-        "gemini-2.5-flash-lite",  # 15 RPM, 250k TPM
+        "gemini-3.5-flash",       # 1. Latest & Smartest (10 RPM, 250k TPM) - Best Vision Quality
+        "gemini-3.1-flash-lite",  # 2. Latest Fast (15 RPM, 250k TPM) - High Speed
+        "gemini-2.5-flash",       # 3. Previous Gen Stable (10 RPM, 250k TPM)
+        "gemini-2.5-flash-lite",  # 4. Previous Gen Fast (15 RPM, 250k TPM)
+        "gemini-2.0-flash",       # 5. Ultimate Emergency Fallback (15 RPM, 1M TPM) - Massive token limit for heavy images
     ]
     
     WEBHOOK_URL: str = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).strip()
